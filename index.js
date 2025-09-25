@@ -1,123 +1,122 @@
-require('dotenv').config()
-const fs = require('fs');
-const pino = require('pino');
-const chalk = require('chalk');
-const readline = require('readline');
-const { Boom } = require('@hapi/boom');
-const qrcode = require('qrcode-terminal');
-const { toBuffer } = require('qrcode');
-const { exec } = require('child_process');
-const { 
-  useMultiFileAuthState,
-  makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersion,
-  makeWASocket,
-  DisconnectReason
-} = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require("baileys")
+const pino = require("pino")
+const chalk = require("chalk")
+const readline = require("readline")
 
-const { app } = require('./lib/server');
+// === Prompt Input Terminal ===
+async function question(prompt) {
+  process.stdout.write(prompt)
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  })
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-const question = (text) => new Promise((resolve) => rl.question(text, resolve))
+  return new Promise((resolve) => rl.question("", (ans) => {
+    rl.close()
+    resolve(ans)
+  }))
+}
 
-let pairingStarted = false;
+// === Fungsi Utama ===
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState("./session")
 
-async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth');
-  const { version } = await fetchLatestBaileysVersion();
+  // Cek versi WA
+  const { version, isLatest } = await fetchLatestBaileysVersion()
+  console.log(`Menggunakan WA v${version.join(".")}, isLatest: ${isLatest}`)
 
-  const conn = makeWASocket({
-    printQRInTerminal: false,
-    syncFullHistory: true,
-    markOnlineOnConnect: true,
+  const sock = makeWASocket({
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false, // QR dimatikan karena pakai pairing code
+    auth: state,
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
     version,
-    browser: ["Windows", "Chrome", "20.0.04"],
-    logger: pino({ level: 'fatal' }),
-    auth: { 
-      creds: state.creds, 
-      keys: makeCacheableSignalKeyStore(state.keys, pino().child({ level: 'silent' }))
-    }
-  });
+  })
 
-  conn.ev.on('creds.update', saveCreds)
-
-  conn.ev.on('connection.update', async (update) => {
-    const { qr, connection, lastDisconnect } = update
-
-    if ((connection === 'connecting' || !!qr) && !conn.authState.creds.registered && !pairingStarted) {
-      setTimeout(async () => {
-        pairingStarted = true;
-        const phone_number = await question(chalk.green("> Masukan nomor aktif (awali dengan 62):\n"));
-        try {
-          const code = await conn.requestPairingCode(phone_number, "NDIKZONE");
-          console.log(chalk.green(`\n[✓] Kode Pairing Anda: ${chalk.bold.white(code?.match(/.{1,4}/g)?.join('-') || code)}`));
-        } catch (error) {
-          console.log(chalk.red(`\n[✗] Gagal pairing: ${error.message}`));
-          process.exit(1);
-        }
-      }, 3000)
-    }
-
-    if (connection === 'close') {
-      const reason = new Boom(lastDisconnect?.error)?.output.statusCode
-      console.log('Disconnected:', reason);
-      exec('rm -rf ./auth/*')
-      process.exit(1)
-    }
-
-    if (connection == 'open') {
-      console.log('✅ Connected:', JSON.stringify(conn.user, null, 2));
-
-      if (process.env.AUTO_GROUP === "true") {
-        await autoCreateGroups(conn, database)
-      } else {
-        console.log(chalk.yellow("⚠️ AUTO_GROUP= false → Grup otomatis tidak dibuat"))
-      }
-    }
-
-    if (qr) {
-      qrcode.generate(qr, { small: true })
-      app.use('/qr', async (req, res) => {
-        res.setHeader('content-type', 'image/png')
-        res.end(await toBuffer(qr))
-      });
-    }
-  });
-}
-
-// === AUTO CREATE GROUP ===
-const delay = ms => new Promise(res => setTimeout(res, ms))
-function getMonthNumber() {
-  return new Date().getMonth() + 1 // bulan 1-12
-}
-
-async function autoCreateGroups(conn, db) {
-  let hasil = []
-  const month = getMonthNumber()
-
-  for (let i = 1; i <= 5; i++) {
-    let randomNum = Math.floor(Math.random() * 100)
-    let groupName = `grup ke ${i} ${month} ${randomNum}`
-    let member = [conn.user.id]
-
+  // === Pairing Code ===
+  if (!sock.authState.creds.registered) {
     try {
-      let group = await conn.groupCreate(groupName, member)
-      if (!group || !group.id) throw new Error("Respon tidak valid")
-
-      let groupId = group.id
-      let list = db.list().buatgc ||= {}
-      list[groupId] = { nama: groupName, creator: conn.user.id }
-      await db.save()
-
-      hasil.push(`✅ Grup *${groupName}* dibuat! 🆔 ${groupId}`)
-
-      if (i < 5) await delay(4000)
-    } catch (e) {
-      console.error("❌ Error buat grup:", e)
+      const phoneNumber = await question("📱 Masukkan nomor diawali 62:\n")
+      const code = await sock.requestPairingCode(phoneNumber.trim())
+      console.log(`✅ Pairing Code: ${code}`)
+    } catch (err) {
+      console.error("Gagal mendapatkan pairing code:", err)
     }
   }
 
-  console.log(chalk.green("📢 Semua grup berhasil dibuat otomatis"))
+  // Simpan sesi login
+  sock.ev.on("creds.update", saveCreds)
+
+  // Status koneksi
+  sock.ev.on("connection.update", (update) => {
+    const { connection } = update
+    if (connection === "close") {
+      console.log(chalk.red("❌ Koneksi terputus, mencoba ulang..."))
+      connectToWhatsApp()
+    } else if (connection === "open") {
+      console.log(chalk.green("✔ Terhubung ke WhatsApp"))
+    }
+  })
+
+  // === Respon Pesan ===
+  sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0]
+    if (!msg.message) return
+
+    const from = msg.key.remoteJid
+    const body =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      ""
+
+    // === Command: Buat Grup Otomatis ===
+    if (body.startsWith(".cg")) {
+      const args = body.split(" ")
+      const total = parseInt(args[1]) || 0
+      const baseName = args.slice(2).join(" ") || "Grup Baru"
+
+      if (isNaN(total) || total <= 0) {
+        return sock.sendMessage(from, { text: "❌ Format salah!\nContoh: .cg 5 grupku" }, { quoted: msg })
+      }
+
+      sock.sendMessage(from, { text: `🔄 Membuat ${total} grup dengan nama: ${baseName}` }, { quoted: msg })
+
+      let current = 1
+      const delayPerGroup = 5000 // 5 detik
+
+      async function createGroups(start) {
+        for (let i = start; i <= total; i++) {
+          try {
+            const groupName = `${baseName} ${i}`
+            await sock.groupCreate(groupName, [from])
+            console.log(chalk.green(`✔ Grup berhasil dibuat: ${groupName}`))
+
+            current = i // update progress terakhir berhasil
+
+            // Jeda sebelum bikin grup berikutnya
+            await new Promise((resolve) => setTimeout(resolve, delayPerGroup))
+          } catch (err) {
+            console.error(chalk.red("❌ Gagal buat grup:"), err)
+
+            // === Deteksi Over Limit ===
+            if (String(err).includes("limit") || String(err).includes("403")) {
+              console.log(chalk.yellow("⚠ Terkena limit, menunggu 1 menit sebelum lanjut..."))
+              await new Promise((resolve) => setTimeout(resolve, 60000)) // delay 1 menit
+
+              // Restart otomatis dari grup berikutnya
+              return createGroups(current + 1)
+            }
+          }
+        }
+
+        sock.sendMessage(from, { text: `✅ Semua ${total} grup selesai dibuat!` }, { quoted: msg })
+      }
+
+      // Mulai proses
+      createGroups(1)
+    }
+  })
 }
 
-start()
+// === Jalankan ===
+connectToWhatsApp()
