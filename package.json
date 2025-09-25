@@ -1,17 +1,23 @@
 {
-  "name": "auto-group-bot",
+  "name": "wa-pairing-bot",
   "version": "1.0.0",
+  "description": "WhatsApp Bot dengan pairing code dan fitur buat grup otomatis",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "pairing",
+    "auto-group"
+  ],
+  "author": "Xyuraa",
+  "license": "MIT",
   "dependencies": {
-    "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.7",
+    "baileys": "^6.7.8",
     "chalk": "^5.3.0",
-    "dotenv": "^16.4.5",
-    "pino": "^9.0.0",
-    "qrcode": "^1.5.3",
-    "qrcode-terminal": "^0.12.0"
+    "pino": "^9.4.0"
   }
 }
